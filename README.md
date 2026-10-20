@@ -10,7 +10,7 @@ npm run dev
 ```
 ## Live demo
 
-[Open RiverPilot AI Mission Control](https://https://river-pilot-ai.vercel.app/)
+[Open RiverPilot AI Mission Control](https://river-pilot-ai.vercel.app/)
 
 Open [http://localhost:3000](http://localhost:3000).
 
