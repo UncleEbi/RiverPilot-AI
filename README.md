@@ -8,6 +8,9 @@ RiverPilot AI is a one-page Fleet Mission Control Screen for a hackathon demo. I
 npm install
 npm run dev
 ```
+## Live demo
+
+[Open RiverPilot AI Mission Control](https://https://river-pilot-ai.vercel.app/)
 
 Open [http://localhost:3000](http://localhost:3000).
 
