@@ -14,14 +14,35 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Six-hour demo flow
 
 - Toggle **Online (Cloud)** and **Offline (Edge Cache)**. Offline mode immediately shows **Edge Mode Active**, a simulated 12ms latency, and zero token cost.
-- Open **Simulate Incident** and choose **Engine Overheat · Boat 2**.
-- Review the 88% confidence triage card, then approve the Swali Ferry dispatch or dismiss it. The map and confirmation state update locally.
+- Click **Run demo** to automatically switch to edge mode, inject the engine-overheat scenario, and approve the simulated Swali Ferry dispatch.
+- Open **Simulate Incident** and choose **Engine Overheat · Boat 2** or **Low Keel Clearance · Boat 3**.
+- Review the explainable triage card, then approve the Swali Ferry dispatch or dismiss it. The map and confirmation state update locally.
 - All content comes from `data/fleet-simulation.json`; no real AIS, cloud inference, or captain commands are connected.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  A[Pre-baked fleet JSON] --> B[React local state]
+  B --> C[Mission Control UI]
+  C --> D[SVG river map]
+  C --> E[Incident simulator]
+  E --> F{Online toggle}
+  F -->|Online| G[Simulated cloud route<br/>820ms / $0.012]
+  F -->|Offline| H[Local rule engine<br/>12ms / $0.000]
+  G --> I[Human approval]
+  H --> I
+  I --> J[Local dispatch outcome]
+  J --> D
+```
+
+The demo is intentionally backend-free. The second incident and the **Run demo** sequence exercise the same local state transitions covered by `npm test`.
 
 ## Checks
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 npm start
 ```
