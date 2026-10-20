@@ -6,8 +6,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "RiverPilot AI | Mission Control",
-  description: "Simulated Niger Delta river-fleet decision support dashboard with local edge heuristics.",
+  title: "RiverPilot AI | Fleet Mission Control",
+  description: "Pre-baked edge-native fleet triage simulation for disconnected waters.",
   manifest: "/manifest.json",
   icons: { icon: "/icon.svg" },
 };

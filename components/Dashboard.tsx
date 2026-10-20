@@ -1,220 +1,84 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Activity, CloudOff, Compass, Cpu, Menu, Satellite, ShieldCheck, Ship, Wifi, X } from "lucide-react";
-import FleetMap from "./FleetMap";
-import TelemetryDrawer from "./TelemetryDrawer";
-import DecisionCard, { type DecisionOutcome } from "./DecisionCard";
-import IncidentSimulator from "./IncidentSimulator";
-import { initialFleet, incidentLabels, type Boat, type IncidentKind, type TelemetryPoint } from "@/lib/mockFleetData";
-import { inferenceRouter, routeIncident, type Decision } from "@/lib/inferenceRouter";
+import { useMemo, useState } from "react";
+import { Activity, AlertTriangle, Check, ChevronDown, Cloud, Cpu, Radio, ShieldCheck, Waves, WifiOff, X, Zap } from "lucide-react";
+import fleetData from "@/data/fleet-simulation.json";
 
-type Resolution = { outcome: DecisionOutcome; decision: Decision };
-type SavedState = {
-  version: 2;
-  requestedOnline: boolean;
-  fleet: Boat[];
-  incidents: Decision[];
-  resolutions: Record<string, Resolution>;
-  lastIncident: string | null;
+type Incident = "engine-overheat" | null;
+type Outcome = "approved" | "dismissed" | null;
+type Boat = (typeof fleetData.boats)[number];
+
+const statusStyles: Record<string, string> = {
+  Normal: "text-cyan-200 border-cyan-400/30 bg-cyan-400/10",
+  Warning: "text-amber-200 border-amber-400/30 bg-amber-400/10",
+  Critical: "text-rose-200 border-rose-400/30 bg-rose-400/10",
+  Idle: "text-slate-300 border-slate-600 bg-slate-700/30",
 };
-const STORAGE_KEY = "riverpilot-dashboard-v2";
-const freshState = (): SavedState => ({ version: 2, requestedOnline: true, fleet: structuredClone(initialFleet), incidents: [], resolutions: {}, lastIncident: null });
-const priorityOrder = { critical: 0, high: 1, watch: 2 };
-const number = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
-
-// A persisted snapshot is untrusted input. Discard old or malformed schemas rather than
-// rendering stale statuses, incomplete sensor points or incompatible decision objects.
-function validPoint(value: unknown): value is TelemetryPoint {
-  if (!value || typeof value !== "object") return false;
-  const p = value as Record<string, unknown>;
-  return typeof p.time === "string" && p.time.length > 0 &&
-    ["speed", "temp", "battery", "rpm", "fuelBurnRate", "depthUnderKeel", "passengerLoad", "loadPercent", "fuelLitres"].every((key) => number(p[key])) &&
-    (p.distanceToStrandedVessel === undefined || number(p.distanceToStrandedVessel));
-}
-function validBoat(value: unknown, id: string): value is Boat {
-  if (!value || typeof value !== "object") return false;
-  const b = value as Record<string, unknown>;
-  const last = Array.isArray(b.telemetry) ? b.telemetry.at(-1) : null;
-  return b.id === id && typeof b.name === "string" && typeof b.callsign === "string" &&
-    typeof b.route === "string" && typeof b.nextWaypoint === "string" &&
-    ["normal", "warning", "critical", "idle"].includes(String(b.status)) &&
-    ["x", "y", "speed", "heading", "battery", "temperature", "rpm", "fuelBurnRate", "depthUnderKeel", "passengerLoad", "capacity", "loadPercent", "fuelLitres"].every((key) => number(b[key])) &&
-    (b.distanceToStrandedVessel === undefined || number(b.distanceToStrandedVessel)) &&
-    (b.inCommsDeadZone === undefined || typeof b.inCommsDeadZone === "boolean") &&
-    (b.fuelOptimal === undefined || typeof b.fuelOptimal === "boolean") &&
-    Array.isArray(b.telemetry) && b.telemetry.length > 0 && b.telemetry.every(validPoint) && validPoint(last) &&
-    last.speed === b.speed && last.temp === b.temperature && last.battery === b.battery && last.rpm === b.rpm &&
-    last.depthUnderKeel === b.depthUnderKeel && last.fuelBurnRate === b.fuelBurnRate &&
-    last.passengerLoad === b.passengerLoad && last.loadPercent === b.loadPercent && last.fuelLitres === b.fuelLitres &&
-    last.distanceToStrandedVessel === b.distanceToStrandedVessel;
-}
-function validDecision(value: unknown): value is Decision {
-  if (!value || typeof value !== "object") return false;
-  const d = value as Record<string, unknown>;
-  return ["id", "boatId", "title", "detail", "rationale", "action", "secondaryAction", "tradeoff"].every((key) => typeof d[key] === "string") &&
-    ["critical", "high", "watch"].includes(String(d.priority)) &&
-    ["dispatch", "throttle", "keel", "overheat"].includes(String(d.kind)) && number(d.confidence) &&
-    Array.isArray(d.lineage) && d.lineage.length > 0 && d.lineage.every((entry: unknown) => {
-      if (!entry || typeof entry !== "object") return false;
-      const e = entry as Record<string, unknown>;
-      return typeof e.boatId === "string" && validPoint(e.point);
-    });
-}
-function restore(value: unknown): SavedState | null {
-  if (!value || typeof value !== "object") return null;
-  const s = value as Record<string, unknown>;
-  const fleet = s.fleet;
-  if (s.version !== 2 || typeof s.requestedOnline !== "boolean" || !Array.isArray(s.fleet) ||
-      s.fleet.length !== initialFleet.length || !initialFleet.every((boat, i) => Array.isArray(fleet) && validBoat(fleet[i], boat.id)) ||
-      !Array.isArray(s.incidents) || !s.incidents.every((d: unknown) => validDecision(d) && ["keel", "overheat"].includes(d.kind)) ||
-      !s.resolutions || typeof s.resolutions !== "object" || Array.isArray(s.resolutions) ||
-      !Object.values(s.resolutions).every((entry) => {
-        if (!entry || typeof entry !== "object") return false;
-        const r = entry as Record<string, unknown>;
-        return ["approved", "dismissed", "signaled", "ignored", "acknowledged"].includes(String(r.outcome)) && validDecision(r.decision);
-      }) || (s.lastIncident !== null && typeof s.lastIncident !== "string")) return null;
-  return s as SavedState;
-}
-
-function changeReadings(boat: Boat, changes: Partial<Boat>, time: string): Boat {
-  const updated = { ...boat, ...changes };
-  const point: TelemetryPoint = {
-    time, speed: updated.speed, temp: updated.temperature, battery: updated.battery,
-    rpm: updated.rpm, fuelBurnRate: updated.fuelBurnRate, depthUnderKeel: updated.depthUnderKeel,
-    passengerLoad: updated.passengerLoad, loadPercent: updated.loadPercent, fuelLitres: updated.fuelLitres,
-    ...(updated.distanceToStrandedVessel === undefined ? {} : { distanceToStrandedVessel: updated.distanceToStrandedVessel }),
-  };
-  return { ...updated, telemetry: [...boat.telemetry, point] };
-}
-const sampleTime = () => new Date().toLocaleTimeString("en-GB", { timeZone: "UTC", hour12: false });
 
 export default function Dashboard() {
-  const [state, setState] = useState<SavedState>(freshState);
-  const [hydrated, setHydrated] = useState(false);
-  const [browserOnline, setBrowserOnline] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mobileMenu, setMobileMenu] = useState(false);
+  const [online, setOnline] = useState(true);
+  const [incident, setIncident] = useState<Incident>(null);
+  const [outcome, setOutcome] = useState<Outcome>(null);
+  const [selectedBoat, setSelectedBoat] = useState<string>("boat-2");
 
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      const saved = stored ? restore(JSON.parse(stored)) : null;
-      if (saved) setState(saved);
-      else if (stored) localStorage.removeItem(STORAGE_KEY);
-      // Remove the incompatible v1 snapshot (which had invalid status values and queue shape).
-      localStorage.removeItem("riverpilot-dashboard-v1");
-    } catch { setState(freshState()); }
-    setHydrated(true);
-    const updateConnection = () => setBrowserOnline(navigator.onLine);
-    updateConnection();
-    window.addEventListener("online", updateConnection);
-    window.addEventListener("offline", updateConnection);
-    return () => { window.removeEventListener("online", updateConnection); window.removeEventListener("offline", updateConnection); };
-  }, []);
-  useEffect(() => {
-    if (!hydrated) return;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* Storage disabled: demo remains usable in memory. */ }
-  }, [state, hydrated]);
-  useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-    if (process.env.NODE_ENV !== "production") {
-      // A development bundle changes on every edit and must never be served from
-      // an older offline cache left by a production preview on localhost.
-      navigator.serviceWorker.getRegistrations().then((registrations) =>
-        Promise.all(registrations.filter((registration) => registration.scope === `${location.origin}/`).map((registration) => registration.unregister()))
-      ).catch(() => undefined);
-      return;
-    }
-    const register = () => navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-    if (document.readyState === "complete") register();
-    else window.addEventListener("load", register);
-    return () => window.removeEventListener("load", register);
-  }, []);
+  const boats = useMemo(() => fleetData.boats.map((boat) => {
+    if (boat.id === "boat-4" && outcome === "approved") return { ...boat, status: "Dispatching", speed: 9.4, x: 76, y: 70 };
+    return boat;
+  }), [outcome]);
+  const activeBoat = boats.find((boat) => boat.id === selectedBoat) ?? boats[1];
+  const showCard = incident === "engine-overheat" && outcome === null;
 
-  const routed = useMemo(() => inferenceRouter(state.fleet, { requestedOnline: hydrated && browserOnline && state.requestedOnline }), [state.fleet, state.requestedOnline, browserOnline, hydrated]);
-  const edge = routed.mode === "edge";
-  const decisions = useMemo(() => {
-    const generated = [...routed.decisions, ...state.incidents];
-    // A manually injected incident is the same alert as the edge heuristic for that boat.
-    const unique = generated.filter((decision, i) => !decision.id.startsWith("edge-") || !generated.slice(i + 1).some((other) => other.kind === decision.kind && other.boatId === decision.boatId && other.id.startsWith("incident-")));
-    const ids = new Set(unique.map((decision) => decision.id));
-    for (const [id, resolution] of Object.entries(state.resolutions)) if (!ids.has(id)) unique.push(resolution.decision);
-    return unique.sort((a, b) => Number(Boolean(state.resolutions[a.id])) - Number(Boolean(state.resolutions[b.id])) || priorityOrder[a.priority] - priorityOrder[b.priority]);
-  }, [routed.decisions, state.incidents, state.resolutions]);
-  const pendingCount = decisions.filter((d) => !state.resolutions[d.id]).length;
-  const selectedBoat = state.fleet.find((boat) => boat.id === selectedId) ?? null;
-
-  const simulate = (kind: IncidentKind) => {
-    setState((current) => {
-      if (kind === "blackout") return { ...current, requestedOnline: !current.requestedOnline, lastIncident: `${incidentLabels[kind]} · ${current.requestedOnline ? "manual blackout on" : "manual blackout off"}` };
-      const id = kind === "keel" ? "rp-01" : "rp-02";
-      const updatedFleet = current.fleet.map((boat) => {
-        if (boat.id !== id) return boat;
-        return kind === "keel"
-          ? changeReadings(boat, { depthUnderKeel: 0.3, speed: 2.1, rpm: 650, fuelBurnRate: 8, status: "critical", x: 27, y: 54, nextWaypoint: "Shallows — stop and assess" }, sampleTime())
-          : changeReadings(boat, { temperature: Math.max(108, boat.temperature + 10), rpm: 2200, fuelBurnRate: 30, speed: 4.8, status: "critical" }, sampleTime());
-      });
-      const changedBoat = updatedFleet.find((boat) => boat.id === id)!;
-      const decision = routeIncident(kind, changedBoat);
-      return { ...current, fleet: updatedFleet, incidents: decision ? [decision, ...current.incidents] : current.incidents,
-        lastIncident: `${incidentLabels[kind]} · ${changedBoat.name} · ${kind === "keel" ? `${changedBoat.depthUnderKeel} m clearance` : `${changedBoat.temperature}°C`}` };
-    });
+  const simulateIncident = (value: string) => {
+    setIncident(value === "engine-overheat" ? "engine-overheat" : null);
+    setOutcome(null);
+    if (value === "engine-overheat") setSelectedBoat("boat-2");
   };
 
-  const resolve = (decision: Decision, outcome: DecisionOutcome) => {
-    setState((current) => {
-      if (current.resolutions[decision.id]) return current;
-      const fleet = current.fleet.map((boat) => {
-        if (decision.kind === "dispatch" && outcome === "approved" && boat.id === "rp-04")
-          return changeReadings(boat, { status: "normal", x: 70, y: 72, heading: 335, speed: 9.6, rpm: 1780, fuelBurnRate: 24, fuelLitres: 82, route: "Rescue dispatch — 14 seats reserved", nextWaypoint: "Niger Star · 14 min ETA", distanceToStrandedVessel: 3.6 }, sampleTime());
-        if (decision.kind === "throttle" && outcome === "signaled" && boat.id === "rp-01")
-          return changeReadings(boat, { status: boat.status === "critical" ? "critical" : "normal", x: 24, y: 56, speed: Math.max(0, boat.speed - 3.5), rpm: 1450, fuelBurnRate: Math.round(boat.fuelBurnRate * 0.78 * 10) / 10, nextWaypoint: "Okrika bend · reduced throttle", fuelOptimal: true }, sampleTime());
-        return boat;
-      });
-      return { ...current, fleet, resolutions: { ...current.resolutions, [decision.id]: { outcome, decision } } };
-    });
-  };
-
-  const sync = !browserOnline ? "Local only · browser offline" : edge ? "Local only · manual blackout" : "Local only · browser online (no remote sync)";
-  const cost = edge ? "$0.0000" : `$${(routed.tokenCost * 0.000002).toFixed(4)}`;
-  const metrics = <><span>Mode: <strong className={edge ? "text-amber-300" : "text-cyan-300"}>{edge ? "Edge heuristics" : "Simulated cloud"}</strong></span><span>Scenario latency: <strong className="text-slate-100">{edge ? "~38 ms (local)" : `~${routed.simulatedCloudRoundtripMs} ms (cloud)`}</strong></span><span>Measured compute: <strong className="text-slate-100">{routed.latency.toFixed(2)} ms</strong></span><span>Est. USD token cost: <strong className="text-slate-100">{cost}</strong></span><span>Sync: <strong className="text-slate-100">{sync}</strong></span></>;
-
-  return <div className="min-h-screen bg-[#070b12] text-slate-200 selection:bg-cyan-400/30">
-    <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_50%_-10%,rgba(19,93,108,.13),transparent_42%)]" />
-    <div className="relative mx-auto flex min-h-screen max-w-[1800px]">
-      {mobileMenu && <button className="fixed inset-0 z-40 bg-black/60 lg:hidden" onClick={() => setMobileMenu(false)} aria-label="Close menu" />}
-      <aside className={`${mobileMenu ? "flex" : "hidden"} fixed inset-y-0 left-0 z-50 w-60 flex-col border-r border-slate-800 bg-[#0a1018] px-4 py-5 lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-[216px] lg:shrink-0`}>
-        <div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><Compass className="text-cyan-400" size={24} /><div><div className="text-sm font-bold text-white">RIVER<span className="text-cyan-400">PILOT</span></div><div className="font-mono text-[9px] tracking-wider text-slate-500">NIGER DELTA · DEMO</div></div></div><button onClick={() => setMobileMenu(false)} className="rounded p-2 lg:hidden" aria-label="Close menu"><X size={18} /></button></div>
-        <div className="mt-12 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-sm text-cyan-300">Mission control</div>
-        <div className="mt-4 px-3 text-xs text-slate-400">Four vessels · {pendingCount} decisions awaiting review</div>
-        <div className="mt-auto rounded-xl border border-slate-800 bg-slate-900/40 p-3 text-xs text-slate-400"><ShieldCheck size={15} className="mb-2 text-cyan-400" />Scenario data and local heuristics. No commands transmitted.</div>
-      </aside>
-      <main className="min-w-0 flex-1">
-        <header className="border-b border-slate-800/80 px-4 py-3 md:px-8"><div className="flex items-center gap-3"><button onClick={() => setMobileMenu(true)} className="rounded p-2 lg:hidden" aria-label="Open menu"><Menu size={20} /></button><span className="text-sm font-semibold text-white">Mission control · Niger Delta</span></div><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] text-slate-400" aria-live="polite">{metrics}</div></header>
-        <div className="mx-auto max-w-[1480px] space-y-6 px-4 py-6 md:px-8">
-          <div><p className="font-mono text-[10px] uppercase tracking-[.22em] text-cyan-400">Fleet command / Niger Delta</p><h1 className="mt-2 text-2xl font-semibold text-white md:text-3xl">RiverPilot · Mission control</h1><p className="mt-2 text-sm text-slate-400">Simulated telemetry and local decision support for four river vessels.</p></div>
-          {edge && <div role="status" className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-200"><CloudOff className="mr-2 inline" size={16} />Offline / edge mode: {sync}. Local heuristics remain available; no cloud request is made.</div>}
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-             <Metric label="Vessels monitored" value={String(state.fleet.length).padStart(2, "0")} detail={`${state.fleet.filter((b) => b.status === "critical").length} critical · ${state.fleet.filter((b) => b.status === "idle").length} idle`} />
-            <Metric label="Decisions pending" value={String(pendingCount)} detail="Operator review required" />
-            <Metric label="Inference mode" value={edge ? "EDGE" : "CLOUD*"} detail={edge ? "Local deterministic heuristics" : "*Simulated cloud; no API"} />
-            <Metric label="Estimated token cost" value={cost} detail={`${routed.tokenCost} simulated tokens · USD estimate`} />
+  return (
+    <main className="min-h-screen bg-[#070b12] text-slate-200">
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_70%_-10%,rgba(34,211,238,.14),transparent_42%)]" />
+      <div className="relative mx-auto min-h-screen max-w-[1500px]">
+        <header className="border-b border-slate-800/90 bg-[#0a1018]/90 px-5 py-4 backdrop-blur md:px-8">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 text-cyan-300"><Waves size={21} /></div><div><div className="text-sm font-bold tracking-[.12em] text-white">RIVER<span className="text-cyan-400">PILOT</span> AI</div><p className="text-[10px] uppercase tracking-[.2em] text-slate-500">Fleet mission control · simulation</p></div></div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => setOnline((value) => !value)} aria-pressed={online} className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition ${online ? "border-cyan-400/30 bg-cyan-400/10 text-cyan-200 hover:bg-cyan-400/20" : "border-amber-400/30 bg-amber-400/10 text-amber-200 hover:bg-amber-400/20"}`}><span className="text-base leading-none">{online ? "●" : "○"}</span>{online ? "Online (Cloud)" : "Offline (Edge Cache)"}</button>
+              <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-300"><AlertTriangle size={14} className="text-amber-300" /><span className="hidden sm:inline">Simulate Incident</span><select aria-label="Simulate Incident" value={incident ?? ""} onChange={(event) => simulateIncident(event.target.value)} className="bg-transparent font-semibold text-white outline-none"><option value="" className="bg-slate-900">Choose…</option><option value="engine-overheat" className="bg-slate-900">Engine Overheat · Boat 2</option></select></label>
+            </div>
           </div>
-          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,1fr)]">
-            <div className="min-w-0 space-y-5"><div><h2 className="flex items-center gap-2 font-semibold text-white"><Satellite size={17} className="text-cyan-400" /> Niger Delta fleet map</h2><p className="mt-1 text-xs text-slate-400">Select a labeled vessel to inspect its readings. Map positions are illustrative.</p></div><div className="relative"><FleetMap fleet={state.fleet} selectedId={selectedId} onSelect={setSelectedId} /><TelemetryDrawer boat={selectedBoat} onClose={() => setSelectedId(null)} /></div><IncidentSimulator onSimulate={simulate} lastIncident={state.lastIncident} blackout={hydrated && !state.requestedOnline} /></div>
-            <div className="min-w-0 space-y-5"><section className="rounded-2xl border border-slate-800 bg-[#0d141d]/80 p-4"><p className="font-mono text-[10px] uppercase tracking-widest text-slate-500">Inference router</p><h2 className="mt-1 flex items-center gap-2 font-semibold text-white"><Cpu size={17} className="text-cyan-400" /> Intelligence status</h2>
-              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-3"><div className="flex min-w-0 items-center gap-2">{edge ? <CloudOff size={18} className="shrink-0 text-amber-300" /> : <Wifi size={18} className="shrink-0 text-cyan-300" />}<div><p className="text-xs font-semibold text-white">{edge ? "Edge heuristics" : "Simulated cloud"}</p><p className="text-[10px] text-slate-400">{sync}</p></div></div><button type="button" role="switch" aria-checked={state.requestedOnline} aria-label="Request simulated cloud mode (manual blackout switch)" onClick={() => simulate("blackout")} className={`relative h-7 w-12 shrink-0 rounded-full ${state.requestedOnline ? "bg-cyan-500" : "bg-slate-600"}`}><span className={`absolute top-1 h-5 w-5 rounded-full bg-slate-950 transition-all ${state.requestedOnline ? "left-6" : "left-1"}`} /></button></div>
-              <div className="mt-3 grid gap-2 rounded-lg bg-slate-950/50 p-3 font-mono text-[11px] text-slate-300">{metrics}</div><p className="mt-3 text-[11px] text-slate-500">{routed.reason} Local compute is measured; roundtrip and token price are scenario estimates. No remote API or WebGPU is used.</p>
-              <div className="mt-3 space-y-1 border-t border-slate-800 pt-3 text-[11px] text-slate-400"><p className="font-semibold text-slate-300">Diagnostics · latest samples</p>{routed.diagnostics.map((item) => <p key={item.boatId}><span className="text-slate-200">{item.name}:</span> {item.alerts.join(" · ")}</p>)}</div>
-            </section><section className="rounded-2xl border border-slate-800 bg-[#0d141d]/80 p-4"><p className="font-mono text-[10px] uppercase tracking-widest text-slate-500">Priority queue</p><h2 className="mt-1 flex items-center gap-2 font-semibold text-white"><Activity size={17} className="text-cyan-400" /> Decisions · {pendingCount} pending</h2><div className="mt-4 max-h-[720px] space-y-3 overflow-y-auto pr-1">{decisions.map((decision) => <DecisionCard key={decision.id} decision={state.resolutions[decision.id]?.decision ?? decision} outcome={state.resolutions[decision.id]?.outcome} onAction={(action) => resolve(decision, action)} />)}</div></section><div className="rounded-xl border border-cyan-400/15 bg-cyan-400/[.04] p-4 text-xs text-slate-300"><ShieldCheck size={16} className="mr-2 inline text-cyan-300" />Human-in-the-loop: all approvals, dismissals and captain signals are simulated local state changes. No commands are transmitted.</div></div>
-          </div><footer className="border-t border-slate-800 pt-4 font-mono text-[10px] uppercase tracking-wider text-slate-500">RiverPilot AI · Niger Delta simulated demo</footer>
+          <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[10px] uppercase tracking-wider text-slate-500"><span className={`flex items-center gap-2 ${online ? "text-cyan-300" : "text-amber-300"}`}>{online ? <Cloud size={13} /> : <WifiOff size={13} />}{online ? "Cloud route simulated" : "Edge Mode Active"}</span><span>Latency <strong className="text-slate-200">{online ? "820ms" : "12ms"}</strong></span><span>Tokens <strong className="text-slate-200">{online ? "$0.012" : "$0.000"}</strong></span><span className="flex items-center gap-1 text-emerald-300"><Radio size={12} /> Local state synced</span></div>
+        </header>
+
+        <div className="space-y-6 px-5 py-7 md:px-8">
+          {!online && <div role="status" className="flex items-center gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100"><Zap size={17} /> Offline mode active — local rules continue triage with a simulated 12ms response and zero data egress.</div>}
+          <section className="flex flex-wrap items-end justify-between gap-4"><div><p className="font-mono text-[10px] uppercase tracking-[.24em] text-cyan-400">Human × AI · edge-native demo</p><h1 className="mt-2 text-3xl font-semibold tracking-tight text-white md:text-4xl">Fleet mission control</h1><p className="mt-2 max-w-2xl text-sm text-slate-400">Pre-baked fleet intelligence for disconnected waters. Every recommendation is explainable, local, and operator-approved.</p></div><div className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-right"><p className="font-mono text-[10px] uppercase tracking-wider text-slate-500">River sector</p><p className="mt-1 text-sm font-semibold text-white">{fleetData.river.name}</p><p className="text-xs text-slate-400">{fleetData.river.route}</p></div></section>
+
+          <section className="grid gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(340px,.8fr)]">
+            <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="flex items-center gap-2 text-base font-semibold text-white"><Activity size={17} className="text-cyan-400" /> Live river map</h2><p className="mt-1 text-xs text-slate-500">Select a vessel pin to inspect the simulated snapshot.</p></div><span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 font-mono text-[10px] text-slate-400">3 ACTIVE PINS · 1 HAZARD</span></div><RiverMap boats={boats} selectedBoat={selectedBoat} onSelect={setSelectedBoat} /></div>
+            <div className="space-y-4"><StatusPanel online={online} activeBoat={activeBoat} /><TriageCard show={showCard} online={online} onApprove={() => setOutcome("approved")} onDismiss={() => setOutcome("dismissed")} /><Outcome outcome={outcome} /></div>
+          </section>
+
+          <section className="grid gap-3 sm:grid-cols-3"><Stat label="Fleet tracked" value="04" detail="Pre-baked vessels" /><Stat label="Decision engine" value={online ? "CLOUD" : "EDGE"} detail={online ? "Simulated cloud path" : "Local rules · 12ms"} /><Stat label="Safety posture" value={outcome === "approved" ? "RESCUE" : incident ? "WATCH" : "READY"} detail="Human approval required" /></section>
+          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-5 font-mono text-[10px] uppercase tracking-wider text-slate-600"><span>RiverPilot AI · local simulation</span><span className="flex items-center gap-2"><ShieldCheck size={12} className="text-cyan-400" /> No live vessel commands transmitted</span></footer>
         </div>
-      </main>
-    </div>
-  </div>;
+      </div>
+    </main>
+  );
 }
 
-function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return <div className="rounded-xl border border-slate-800 bg-[#0d141d]/80 p-4"><p className="text-xs text-slate-400">{label}</p><p className="mt-2 font-mono text-2xl text-white">{value}</p><p className="mt-2 text-[11px] text-slate-500">{detail}</p></div>;
+function RiverMap({ boats, selectedBoat, onSelect }: { boats: Boat[]; selectedBoat: string; onSelect: (id: string) => void }) {
+  const visible = boats.filter((boat) => ["boat-1", "boat-2", "boat-4"].includes(boat.id));
+  return <div className="scanline relative min-h-[430px] overflow-hidden rounded-2xl border border-slate-800 bg-[#08141c] shadow-cyan sm:min-h-[520px]"><div className="mission-grid absolute inset-0 opacity-70" /><svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M-6 72 C 15 50, 26 79, 42 56 S 72 22, 106 43" fill="none" stroke="#0d3440" strokeWidth="18" /><path d="M-6 72 C 15 50, 26 79, 42 56 S 72 22, 106 43" fill="none" stroke="#0b222b" strokeWidth="13" /><path d="M-6 72 C 15 50, 26 79, 42 56 S 72 22, 106 43" fill="none" stroke="#1e6470" strokeWidth=".45" strokeDasharray="2 1.5" /><path d="M18 88 Q40 70 48 54 T80 20" fill="none" stroke="#2dd4bf" strokeWidth=".35" strokeDasharray="1 1.5" /><circle cx={fleetData.river.sandbank.x} cy={fleetData.river.sandbank.y} r={fleetData.river.sandbank.radius} fill="#b88745" opacity=".22" stroke="#fbbf24" strokeWidth=".25" strokeDasharray="1 1" /></svg><div className="absolute left-5 top-5 flex items-center gap-2 text-xs font-semibold text-cyan-300"><Waves size={15} /> {fleetData.river.name}</div><div className="absolute left-[64%] top-[48%] rounded bg-slate-950/85 px-2 py-1 text-[10px] text-amber-200">Shallow sandbank<br /><span className="text-slate-500">0.6m clearance</span></div><div className="absolute bottom-5 left-5 rounded-lg border border-slate-700/70 bg-slate-950/80 px-3 py-2 font-mono text-[10px] text-slate-500"><span className="text-cyan-300">BONNY CREEK</span> → SWALI REACH<br />Illustrative coordinates · local cache</div><div className="absolute bottom-5 right-5 rounded-full border border-slate-700 bg-slate-950/80 px-3 py-1.5 text-[10px] text-slate-400">AIS SIMULATION · 3 PINS</div>{visible.map((boat) => <button key={boat.id} type="button" onClick={() => onSelect(boat.id)} aria-label={`Select ${boat.name}`} aria-pressed={selectedBoat === boat.id} style={{ left: `${boat.x}%`, top: `${boat.y}%` }} className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-slate-950/90 px-2 py-1.5 text-left shadow-lg transition hover:scale-105 ${selectedBoat === boat.id ? "border-cyan-300 ring-2 ring-cyan-400/20" : "border-slate-700"}`}><span className={`block text-[10px] font-bold ${boat.id === "boat-2" ? "text-amber-200" : boat.id === "boat-4" && boat.status === "Dispatching" ? "text-emerald-200" : boat.id === "boat-1" ? "text-cyan-200" : "text-slate-300"}`}>{boat.shortName} · {boat.name}</span><span className="block text-[10px] text-slate-400">{boat.status} · {boat.speed} kn</span></button>)}</div>;
 }
+
+function StatusPanel({ online, activeBoat }: { online: boolean; activeBoat: Boat }) {
+  return <section className="rounded-2xl border border-slate-800 bg-[#0d141d]/85 p-5"><div className="flex items-start justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-slate-500">Selected vessel</p><h2 className="mt-1 text-xl font-semibold text-white">{activeBoat.name}</h2></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase ${statusStyles[activeBoat.status] ?? statusStyles.Idle}`}>{activeBoat.status}</span></div><div className="mt-5 grid grid-cols-2 gap-2">{[["Speed", `${activeBoat.speed} kn`], ["Load", `${activeBoat.load}%`], ["Engine", `${activeBoat.engineTemp ?? 72}°C`], ["Data source", online ? "Cloud sim" : "Edge cache"]].map(([label, value]) => <div key={label} className="rounded-xl border border-slate-800 bg-slate-950/50 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p><p className="mt-1 font-mono text-lg text-slate-100">{value}</p></div>)}</div><div className="mt-4 flex items-center gap-2 border-t border-slate-800 pt-4 text-xs text-slate-400"><Cpu size={15} className="text-cyan-400" /> Deterministic mock telemetry snapshot</div></section>;
+}
+
+function TriageCard({ show, online, onApprove, onDismiss }: { show: boolean; online: boolean; onApprove: () => void; onDismiss: () => void }) {
+  if (!show) return <section className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/30 p-5"><div className="flex items-center gap-2 text-sm font-semibold text-slate-300"><ChevronDown size={16} className="text-slate-500" /> Triage queue ready</div><p className="mt-2 text-xs leading-relaxed text-slate-500">Choose <strong className="text-slate-300">Engine Overheat · Boat 2</strong> from the simulator above to generate an explainable intervention card.</p></section>;
+  return <section className="rounded-2xl border border-rose-400/30 bg-[#17131b] p-5 shadow-[0_0_34px_rgba(251,113,133,.08)]"><div className="flex items-start justify-between gap-3"><div><div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-rose-300"><AlertTriangle size={14} /> AI triage decision</div><h2 className="mt-2 text-lg font-semibold text-white">Engine Overheat · Boat 2</h2></div><span className="rounded-full border border-rose-400/30 bg-rose-400/10 px-2 py-1 font-mono text-[10px] text-rose-200">URGENT</span></div><div className="mt-5 flex items-end justify-between border-b border-slate-800 pb-4"><div><p className="text-[10px] uppercase tracking-wider text-slate-500">Confidence</p><p className="mt-1 font-mono text-3xl font-semibold text-white">88<span className="text-lg text-rose-300">%</span></p></div><div className="max-w-[210px] text-right text-xs text-slate-400">{online ? "Cloud path simulated · 820ms" : "Local rule engine · 12ms"}</div></div><div className="mt-4 rounded-xl border border-amber-400/20 bg-amber-400/5 p-4"><p className="text-[10px] uppercase tracking-wider text-amber-300">Suggested action</p><p className="mt-2 text-sm leading-relaxed text-slate-100">Throttle engine down by 30%, dispatch Boat 4 (Swali Ferry) for passenger transfer.</p></div><p className="mt-3 text-xs leading-relaxed text-slate-400">Triggered by Boat 2 engine temperature at <strong className="text-amber-200">98°C</strong>, sustained load at 50%, and an active communications dead zone. Human approval is required.</p><div className="mt-5 flex flex-wrap gap-2"><button type="button" onClick={onApprove} className="flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-cyan-300"><Check size={15} /> Approve Dispatch</button><button type="button" onClick={onDismiss} className="flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2.5 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"><X size={15} /> Dismiss</button></div></section>;
+}
+
+function Outcome({ outcome }: { outcome: Outcome }) { if (!outcome) return null; return <div role="status" className={`rounded-xl border p-4 text-sm ${outcome === "approved" ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-slate-600 bg-slate-800/40 text-slate-300"}`}>{outcome === "approved" ? "Dispatch approved locally — Swali Ferry is underway for passenger transfer." : "Recommendation dismissed locally — no simulated dispatch was created."}</div>; }
+function Stat({ label, value, detail }: { label: string; value: string; detail: string }) { return <div className="rounded-xl border border-slate-800 bg-[#0d141d]/80 p-4"><p className="text-xs text-slate-500">{label}</p><p className="mt-2 font-mono text-2xl font-semibold text-white">{value}</p><p className="mt-1 text-[10px] text-slate-600">{detail}</p></div>; }

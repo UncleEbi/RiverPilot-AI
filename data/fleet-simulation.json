@@ -1,0 +1,13 @@
+{
+  "river": {
+    "name": "Lower Niger Delta",
+    "route": "Bonny Creek / Swali Reach",
+    "sandbank": { "label": "Shallow sandbank", "x": 70, "y": 57, "radius": 9 }
+  },
+  "boats": [
+    { "id": "boat-1", "name": "Delta Express", "shortName": "Boat 1", "x": 24, "y": 58, "status": "Normal", "speed": 8.8, "load": 85, "color": "cyan" },
+    { "id": "boat-2", "name": "Creek Runner", "shortName": "Boat 2", "x": 48, "y": 35, "status": "Warning", "speed": 6.2, "load": 50, "engineTemp": 98, "color": "amber" },
+    { "id": "boat-3", "name": "Niger Star", "shortName": "Boat 3", "x": 76, "y": 64, "status": "Critical", "speed": 0, "load": 70, "passengers": 14, "color": "rose" },
+    { "id": "boat-4", "name": "Swali Ferry", "shortName": "Boat 4", "x": 82, "y": 78, "status": "Idle", "speed": 0, "load": 0, "color": "slate" }
+  ]
+}
