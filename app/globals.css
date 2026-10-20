@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  background: #070b12;
+  color: #e2e8f0;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+button, input { font: inherit; }
+button { cursor: pointer; }
+.mission-grid {
+  background-image: linear-gradient(rgba(148,163,184,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.045) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.scanline { position: relative; overflow: hidden; }
+.scanline::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .12;
+  background: repeating-linear-gradient(0deg, transparent 0, transparent 3px, rgba(255,255,255,.08) 4px);
+  mix-blend-mode: overlay;
+}
+.glow-dot { box-shadow: 0 0 0 3px rgba(34,211,238,.08), 0 0 20px rgba(34,211,238,.75); }
+.map-hud { text-shadow: 0 0 12px rgba(34,211,238,.5); }
+@keyframes pulse-soft { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+.pulse-soft { animation: pulse-soft 2.4s ease-in-out infinite; }

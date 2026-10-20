@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.next-dev/
+.opencode/
+opencode.jsonc
+out/
+*.tsbuildinfo
+.env*.local
